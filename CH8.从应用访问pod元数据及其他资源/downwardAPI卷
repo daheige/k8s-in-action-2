@@ -1,0 +1,147 @@
+## downwardAPI卷
+
+示例yaml
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-downward-vol
+  labels:                  
+    foo: bar               
+  annotations:             
+    key1: value1           
+    key2: |                
+      multi                
+      line                 
+      value                
+spec:
+  containers:
+  - name: busybox-1
+    image: art.sinovatio.com/public-docker/busybox:latest
+    command: ["sleep", "9999999"]
+    resources:
+      requests:
+        cpu: 15m
+        memory: 100Ki
+      limits:
+        cpu: 1000m
+        memory: 1000Mi
+    volumeMounts:                       
+    - name: downward                    ## 卷名称
+      mountPath: /etc/downward          ## pod内容器的挂载点
+  volumes:
+  - name: downward                      ## 卷名称           
+    downwardAPI:                        ## 指明是downwardAPI卷
+      items:
+      - path: "podName"                 ## 写入pod内的容器的哪个文件，组合mountPath
+        fieldRef:                       ## 字段引用
+          fieldPath: metadata.name      ## podName文件的内容来源于metadata.name字段的值
+      - path: "podNamespace"
+        fieldRef:
+          fieldPath: metadata.namespace
+      - path: "labels"                   ## pod的标签内容会被保存到pod内地容器/etc/downward/labels文件中 
+        fieldRef:                            
+          fieldPath: metadata.labels         
+      - path: "annotations"                   
+        fieldRef:                             
+          fieldPath: metadata.annotations     
+      - path: "containerCpuRequestMilliCores"
+        resourceFieldRef:                ## 资源字段引用
+          containerName: busybox-1       ## 注意：使用resourceFieldRef字段时，必须指定对应的容器名称
+          resource: requests.cpu
+          divisor: 1m
+      - path: "containerMemoryLimitBytes"
+        resourceFieldRef:
+          containerName: busybox-1
+          resource: limits.memory
+          divisor: 1
+```
+
+**注意**：使用resourceFieldRef字段时，必须指定对应的容器名称
+
+**思考**：因为podName，annotations这类数据是针对pod的（定义在pod的`metadata`字段下），所以不需要知道pod内的容器名称。而资源（CPU、内存）则是针对pod内的容器的。可以参考yaml定义，`resources`及其附属字段（`requests`和`limits`）是定义在`containers`数组这个字段下的，说明针对的是容器而非pod。
+
+验证
+
+```shell
+$ kubectl exec pod-downward-vol -- ls -l /etc/downward
+total 0
+lrwxrwxrwx    1 root    root    18 Jul 22 01:43 annotations -> ..data/annotations
+lrwxrwxrwx    1 root    root    36 Jul 22 01:43 containerCpuRequestMilliCores -> ..data/containerCpuRequestMilliCores
+lrwxrwxrwx    1 root    root    32 Jul 22 01:43 containerMemoryLimitBytes -> ..data/containerMemoryLimitBytes
+lrwxrwxrwx    1 root    root    13 Jul 22 01:43 labels -> ..data/labels
+lrwxrwxrwx    1 root    root    14 Jul 22 01:43 podName -> ..data/podName
+lrwxrwxrwx    1 root    root    19 Jul 22 01:43 podNamespace -> ..data/podNamespace
+
+## 可以看到annotation文件中保存了一个键为key2的注解，它的值是多行内容，写入到文件时使用\n分隔
+$ kubectl exec pod-downward-vol -- cat /etc/downward/annotations
+cni.projectcalico.org/podIP="172.42.0.117/32"
+key1="value1"
+key2="multi                \nline                 \nvalue                \n"
+kubernetes.io/config.seen="2020-07-22T01:43:26.146792854Z"
+kubernetes.io/config.source="api"
+
+$ kubectl exec pod-downward-vol -- cat /etc/downward/labels
+foo="bar"
+
+$ kubectl exec pod-downward-vol -- cat /etc/downward/podName
+pod-downward-vol
+
+$ kubectl exec pod-downward-vol -- cat /etc/downward/podNamespace
+prod
+
+$ kubectl exec pod-downward-vol -- cat /etc/downward/containerCpuRequestMilliCores
+15
+
+$ kubectl exec pod-downward-vol -- cat /etc/downward/containerMemoryLimitBytes
+1048576000$
+```
+
+downwardAPI卷与configMap卷和secret卷一样，可以通过`pod.spec.containers.volumes.configMap.defaultMode`进行修改。默认权限是`644（rw-r--r--）`。
+
+验证文件权限
+
+```shell
+## 查找其中一个文件如podName，原始文件为/etc/downward/..2020_07_22_01_43_35.776652388/podName
+$ kubectl exec pod-downward-vol -- find / -name podName
+/etc/downward/..2020_07_22_01_43_35.776652388/podName
+/etc/downward/podName
+
+## 列出原始目录的文件，查看权限为644（rw-r--r--）
+$ kubectl exec pod-downward-vol -- ls -l /etc/downward/..2020_07_22_01_43_35.776652388/
+total 24
+-rw-r--r--    1 root     root           229 Jul 22 01:43 annotations
+-rw-r--r--    1 root     root             2 Jul 22 01:43 containerCpuRequestMilliCores
+-rw-r--r--    1 root     root            10 Jul 22 01:43 containerMemoryLimitBytes
+-rw-r--r--    1 root     root             9 Jul 22 01:43 labels
+-rw-r--r--    1 root     root            16 Jul 22 01:43 podName
+-rw-r--r--    1 root     root             4 Jul 22 01:43 podNamespace
+```
+
+修改标签后，使用downwardAPI可以获取到最新的值，而是用环境变量的方法则无法获取更新。
+
+验证
+
+```shell
+## 修改pod-downward-vol
+## 增加app=downward-vol标签
+## 修改键为key1的注解为value1-edit
+## 保存并退出
+$ kubectl edit po pod-downward-vol
+pod/pod-downward-vol edited
+
+## 重新查看pod内的容器挂载的文件
+$ kubectl exec pod-downward-vol -- cat /etc/downward/labels
+app="downward-vol"                   ## 变更生效
+foo="bar"
+
+$ kubectl exec pod-downward-vol -- cat /etc/downward/annotations
+cni.projectcalico.org/podIP="172.42.0.117/32"
+key1="value1-edit"                   ## 变更生效
+key2="multi                \nline                 \nvalue                \n"
+kubernetes.io/config.seen="2020-07-22T01:43:26.146792854Z"
+kubernetes.io/config.source="api"
+```
+
+downwardAPI卷只能暴露自身pod相关的元数据，无法获取到别的pod的元数据，且获取的自身pod的元数据也比较有限。所以需要使用k8s API服务器。
